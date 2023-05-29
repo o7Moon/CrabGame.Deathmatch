@@ -1,66 +1,106 @@
 ﻿using BepInEx;
 using BepInEx.IL2CPP;
+using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.SceneManagement;
+using UnityEngine.Events;
 using System.Collections.Generic;
 using System.IO;
 
-namespace MutePlus
+namespace Deathmatch
 {
     [BepInPlugin(PluginInfo.PLUGIN_GUID, PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION)]
     public class Plugin : BasePlugin
     {
-        public static HashSet<ulong> MutedPlayers;
-        public static string muteFile;
+        public static ConfigEntry<bool> toggled;
+        public static ConfigEntry<int> weapon;
+        public static ConfigEntry<int> bonusTime;
+        public static bool roundEndedYet = false;
+        public static bool addedBonusTime = false;
         public override void Load()
         {
-            MutedPlayers = new HashSet<ulong>();
-            muteFile = Application.dataPath + "\\MutedPlayers.txt";
-            if (!File.Exists(muteFile)){
-                File.Create(muteFile);
-            }
-            foreach (string s in File.ReadAllLines(muteFile)) {
-                MutedPlayers.Add(ulong.Parse(s));
-            }
             Harmony.CreateAndPatchAll(typeof(Plugin));
-            // Plugin startup logic
+            toggled = Config.Bind<bool>("Deathmatch","Enabled",true,"If true, deathmatch replaces tag. this reloads every time you switch maps");
+            weapon = Config.Bind<int>("Deathmatch","Weapon", 6, "The item ID of the weapon to give every player. Default is katana");
+            bonusTime = Config.Bind<int>("Deathmatch","Bonus Time", 180, "This number is added onto the round timer");
+            SceneManager.sceneLoaded += (UnityAction<Scene,LoadSceneMode>) OnSceneLoad;
+
             Log.LogInfo($"Plugin {PluginInfo.PLUGIN_GUID} is loaded!");
         }
-        [HarmonyPatch(typeof(PlayerManager),nameof(PlayerManager.SetPlayer))]
-        [HarmonyPostfix]
-        public static void onPlayerManagerAssigned(PlayerManager __instance, ulong __0, int __1, bool __2){
-            if (MutedPlayers.Contains(__0)){
-                LobbyManager.Instance.mutedPlayers[__0] = true;
-                __instance.username = "[MUTED]";
-                __instance.playerName.SetName("[MUTED]");
-                __instance.UpdateForceMute();
-            }
+
+        public void OnSceneLoad(Scene scene, LoadSceneMode mode){
+            Config.Reload();
         }
-        [HarmonyPatch(typeof(ManagePlayerListing),nameof(ManagePlayerListing.MutePlayer))]
-        [HarmonyPostfix]
-        public static void OnPlayerMuted(ManagePlayerListing __instance){
-            // this method is actually a toggle so 
-            // if muted:
-            if (LobbyManager.Instance.mutedPlayers[__instance.field_Private_UInt64_0]){
-                if (!MutedPlayers.Contains(__instance.field_Private_UInt64_0)){
-                    File.AppendAllLines(muteFile, new string[]{__instance.field_Private_UInt64_0.ToString()});
-                }
-                MutedPlayers.Add(__instance.field_Private_UInt64_0);
-            } else {// if unmuted:
-                MutedPlayers.Remove(__instance.field_Private_UInt64_0);
-                var content = new List<string>(File.ReadAllLines(muteFile));
-                content.Remove(__instance.field_Private_UInt64_0.ToString());
-                File.WriteAllLines(muteFile,content);
-            }
-        }
-        [HarmonyPatch(typeof(ChatBox),nameof(ChatBox.AppendMessage))]
+
+        [HarmonyPatch(typeof(GameModeTag), nameof(GameModeTag.OnFreezeOver))]
         [HarmonyPrefix]
-        public static bool OnReceiveMessage(ChatBox __instance, ulong __0, string __1, string __2){
-            if (MutedPlayers.Contains(__0)) {
-                return false;
+        public static bool OnFreezeOver(GameModeTag __instance) {
+            if (!toggled.Value) return true;
+            GameServer.ForceGiveAllWeapon(weapon.Value);
+            addedBonusTime = false;
+            return false;
+        }
+
+        [HarmonyPatch(typeof(GameModeTag), nameof(GameModeTag.OnFreezeOverAlert))]
+        [HarmonyPrefix]
+        public static bool FreezeOverAlert(GameModeTag __instance) {
+            return !toggled.Value; // skip alert if toggled
+        }
+
+        [HarmonyPatch(typeof(GameModeTag), nameof(GameModeTag.CheckGameOver))]
+        [HarmonyPrefix]
+        public static bool CheckGameOver(GameModeTag __instance) {
+            if (!toggled.Value) return true;
+            if (!SteamManager.Instance.IsLobbyOwner()) return false;
+            if (__instance.modeState == GameMode.EnumNPublicSealedvaFrPlEnGa5vUnique.Freeze) return false;
+            if (roundEndedYet) return false;
+
+            if (!addedBonusTime){
+                addedBonusTime = true;
+                __instance.freezeTimer.field_Private_Single_0 += bonusTime.Value;
             }
-            return true;
+
+            List<PlayerManager> alivePlayers = new List<PlayerManager>();
+
+            foreach (PlayerManager player in GameManager.Instance.activePlayers.values){
+                if (!player.dead) alivePlayers.Add(player);
+            }
+
+            if (__instance.freezeTimer.field_Private_Single_0 < 1) {
+                foreach (var p in alivePlayers) {
+                    ServerSend.PlayerDied((ulong)p.steamProfile, (ulong)p.steamProfile,Vector3.up * 1000f);
+                }
+                alivePlayers.RemoveAll((p)=>{return true;});
+            }
+
+            // there can only be one
+            if (alivePlayers.Count < 2) {
+                if (alivePlayers.Count < 1) {
+                    ServerSend.SendChatMessage(1,"nobody wins, L");
+                    SetWinner(__instance, 0uL);
+                } else {
+                    ServerSend.PlayerDied((ulong) alivePlayers[0].steamProfile, (ulong) alivePlayers[0].steamProfile, Vector3.zero);
+                    ServerSend.SendChatMessage(1, alivePlayers[0].username + " wins, W");
+                    SetWinner(__instance, (ulong) alivePlayers[0].steamProfile);
+                }
+                roundEndedYet = true;
+            }
+            
+            return false;
+        }
+
+        [HarmonyPatch(typeof(GameModeTag),nameof(GameModeTag.InitMode))]
+        [HarmonyPostfix]
+        public static void InitMode(GameModeTag __instance) {
+            roundEndedYet = false;
+        }
+
+        public static void SetWinner(GameModeTag __instance, ulong winner) {
+            ServerSend.GameOver(winner);
+            __instance.modeState = GameMode.EnumNPublicSealedvaFrPlEnGa5vUnique.GameOver;
+            __instance.freezeTimer.field_Private_Single_0 = 3;
         }
     }
 }

@@ -62,3 +62,4 @@ global using PunchPlayers = MonoBehaviourPublicObsfBoLawhSiUnique;
 global using RevealPlayerNames = MonoBehaviourPublicLi1ObplLawhRaUnique;
 global using MoveCamera = MonoBehaviourPublicTrplVeofdeVevaCaRiVeUnique;
 global using ManagePlayerListing = MonoBehaviourPublicTrwiReGakibaGaTeplmuUnique;
+global using GameModeSteppingGlass = GameModePublicLi1InLi1InUnique;
